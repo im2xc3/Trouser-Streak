@@ -1,0 +1,310 @@
+package pwn.noobs.trouserstreak.modules;
+
+import meteordevelopment.meteorclient.events.entity.player.StartBreakingBlockEvent;
+import meteordevelopment.meteorclient.events.render.Render3DEvent;
+import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.renderer.ShapeMode;
+import meteordevelopment.meteorclient.settings.*;
+import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.misc.Pool;
+import meteordevelopment.meteorclient.utils.player.Rotations;
+import meteordevelopment.meteorclient.utils.render.color.Color;
+import meteordevelopment.meteorclient.utils.render.color.SettingColor;
+import meteordevelopment.meteorclient.utils.world.BlockUtils;
+import meteordevelopment.orbit.EventHandler;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
+import net.minecraft.network.protocol.game.ServerboundPunchPacket;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.item.component.SwingAnimation;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.phys.Vec3;
+import pwn.noobs.trouserstreak.Trouser;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+
+public class InstaMineNuker extends Module {
+    private final SettingGroup sgGeneral = settings.getDefaultGroup();
+    private final SettingGroup sgRender = settings.createGroup("Render");
+
+    // General
+    private final Setting<Modes> mode = sgGeneral.add(new EnumSetting.Builder<Modes>()
+            .name("Break Mode")
+            .description("the shape of the breaking")
+            .defaultValue(Modes.Sphere)
+            .build());
+    private final Setting<Boolean> onlyInstamineable = sgGeneral.add(new BoolSetting.Builder()
+            .name("Only break Instamineable blocks")
+            .description("Only breaks the Instamineable blocks")
+            .defaultValue(false)
+            .build()
+    );
+    private final Setting<listModes> listmode = sgGeneral.add(new EnumSetting.Builder<listModes>()
+            .name("List Mode")
+            .description("Whether to break or not break the block list.")
+            .defaultValue(listModes.blacklist)
+            .build());
+    private final Setting<List<Block>> skippableBlox = sgGeneral.add(new BlockListSetting.Builder()
+            .name("Blocks to Skip")
+            .description("Skips instamining this block.")
+            .visible(() -> listmode.get()== listModes.blacklist)
+            .build()
+    );
+    private final Setting<List<Block>> nonskippableBlox = sgGeneral.add(new BlockListSetting.Builder()
+            .name("Blocks to Break")
+            .description("Only instamine these blocks.")
+            .visible(() -> listmode.get()== listModes.whitelist)
+            .build()
+    );
+    private final Setting<Double> spherereach = sgGeneral.add(new DoubleSetting.Builder()
+            .name("Sphere Range")
+            .description("Your Range, in blocks.")
+            .defaultValue(5)
+            .sliderRange(1,5)
+            .min (1)
+            .visible(() -> mode.get() == Modes.Sphere)
+            .build()
+    );
+    private final Setting<Integer> boxreach = sgGeneral.add(new IntSetting.Builder()
+            .name("Box Range")
+            .description("Your Range, in blocks.")
+            .defaultValue(4)
+            .sliderRange(1,4)
+            .min (1)
+            .visible(() -> mode.get() == Modes.Box)
+            .build()
+    );
+    private final Setting<Boolean> nobelowfeet = sgGeneral.add(new BoolSetting.Builder()
+            .name("Don't break below feet")
+            .description("Don't target blocks below feet")
+            .defaultValue(true)
+            .build()
+    );
+    private final Setting<Integer> delay = sgGeneral.add(new IntSetting.Builder()
+            .name("delay")
+            .description("Delay in ticks between breaking blocks.")
+            .defaultValue(0)
+            .build()
+    );
+    private final Setting<Integer> maxBlocksPerTick = sgGeneral.add(new IntSetting.Builder()
+            .name("max-blocks-per-tick")
+            .description("Maximum blocks to try to break per tick.")
+            .defaultValue(4)
+            .min(1)
+            .sliderRange(1, 100)
+            .build()
+    );
+    private final Setting<Boolean> swing = sgGeneral.add(new BoolSetting.Builder()
+            .name("Swing Hand")
+            .description("Do or Do Not swing hand when instamining.")
+            .defaultValue(true)
+            .build()
+    );
+    private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
+            .name("rotate")
+            .description("Faces the blocks being mined server side.")
+            .defaultValue(true)
+            .build()
+    );
+    private final Setting<ShapeMode> shapeModeBreak = sgRender.add(new EnumSetting.Builder<ShapeMode>()
+            .name("nuke-block-mode")
+            .description("How the shapes for broken blocks are rendered.")
+            .defaultValue(ShapeMode.Both)
+            .build()
+    );
+    private final Setting<SettingColor> sideColor = sgRender.add(new ColorSetting.Builder()
+            .name("side-color")
+            .description("The side color of the target block rendering.")
+            .defaultValue(new SettingColor(255, 0, 0, 10))
+            .build()
+    );
+    private final Setting<SettingColor> lineColor = sgRender.add(new ColorSetting.Builder()
+            .name("line-color")
+            .description("The line color of the target block rendering.")
+            .defaultValue(new SettingColor(255, 0, 0, 255))
+            .build()
+    );
+    private Direction direction;
+    private int ticks;
+    private Pool<RenderBlock> renderBlockPool;
+    private List<RenderBlock> renderBlocks;
+    private double reach = 0;
+
+    public InstaMineNuker() {
+        super(Trouser.Main, "InstaMineNuker", "Sends packets to break blocks around you.");
+    }
+
+    @Override
+    public void onActivate() {
+        if (mc.player == null) return;
+
+        renderBlockPool = new Pool<>(RenderBlock::new);
+        renderBlocks = new ArrayList<>();
+
+        direction=mc.player.getDirection();
+        ticks = 0;
+        for (RenderBlock renderBlock : renderBlocks) renderBlockPool.free(renderBlock);
+        renderBlocks.clear();
+    }
+
+    @Override
+    public void onDeactivate() {
+        for (RenderBlock renderBlock : renderBlocks) renderBlockPool.free(renderBlock);
+        renderBlocks.clear();
+    }
+
+    @EventHandler
+    private void onRender(Render3DEvent event) {
+        // Broken block
+        renderBlocks.sort(Comparator.comparingInt(o -> -o.ticks));
+        renderBlocks.forEach(renderBlock -> renderBlock.render(event, sideColor.get(), lineColor.get(), shapeModeBreak.get()));
+
+    }
+    @EventHandler
+    private void onStartBreakingBlock(StartBreakingBlockEvent event) {
+        direction = event.direction;
+    }
+    @EventHandler
+    private void onTickPre(TickEvent.Pre event) {
+        if (mode.get() == Modes.Sphere) reach=spherereach.get();
+        else if (mode.get() == Modes.Box) reach=boxreach.get();
+        ticks++;
+        renderBlocks.forEach(RenderBlock::tick);
+        renderBlocks.removeIf(renderBlock -> renderBlock.ticks <= 0);
+        int count = 0;
+        int bottomlimit = (int) (mc.player.getBlockY() - Math.round(Math.ceil(reach)));
+        if (nobelowfeet.get()) bottomlimit = mc.player.getBlockY();
+        if (ticks>=delay.get()){
+            // Create a list of all the blocks within the specified range
+            List<BlockPos> blocks = new ArrayList<>();
+            for (int x = (int) (mc.player.getBlockX() - Math.round(Math.ceil(reach))); x <= mc.player.getBlockX() + Math.round(Math.ceil(reach)); x++) {
+                for (int y = bottomlimit; y <= (mc.player.getBlockY()+1) + Math.round(Math.ceil(reach)); y++) {
+                    for (int z = (int) (mc.player.getBlockZ() - Math.round(Math.ceil(reach))); z <= mc.player.getBlockZ() + Math.round(Math.ceil(reach)); z++) {
+                        BlockPos blockPos = new BlockPos(x, y, z);
+                        Vec3 playerPos1 = Vec3.atCenterOf(new BlockPos(mc.player.getBlockX(), mc.player.getBlockY(), mc.player.getBlockZ()));
+                        Vec3 playerPos2 = Vec3.atCenterOf(new BlockPos(mc.player.getBlockX(), mc.player.getBlockY()+1, mc.player.getBlockZ()));
+                        double distance1 = playerPos1.distanceTo(Vec3.atCenterOf(blockPos));
+                        double distance2 = playerPos2.distanceTo(Vec3.atCenterOf(blockPos));
+                        switch (mode.get()) {
+                            case Sphere -> {
+                                if (!blocks.contains(blockPos) && distance1 <= reach || distance2 <= reach) blocks.add(blockPos);
+                            }
+                            case Box -> {
+                                if (!blocks.contains(blockPos)) blocks.add(blockPos);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Sort the blocks by distance from the player
+            blocks.sort(Comparator.comparingDouble(pos -> pos.distToCenterSqr(mc.player.position())));
+
+            for (BlockPos blockPos : blocks) {
+                assert mc.level != null;
+                if (count >= maxBlocksPerTick.get()) break;
+                // Get the block at the current coordinates
+                if (onlyInstamineable.get()){
+                    if (((listmode.get()== listModes.whitelist && nonskippableBlox.get().contains(mc.level.getBlockState(blockPos).getBlock())) || (listmode.get()== listModes.blacklist && !skippableBlox.get().contains(mc.level.getBlockState(blockPos).getBlock()))) && rotate.get() && BlockUtils.canBreak(blockPos) && BlockUtils.canInstaBreak(blockPos)){
+                        renderBlocks.add(renderBlockPool.get().set(blockPos));
+                        if (direction != null) {
+                            Rotations.rotate(Rotations.getYaw(blockPos), Rotations.getPitch(blockPos), () -> mc.getConnection().send(new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, blockPos, direction)));
+                            if (swing.get()){
+                                mc.getConnection().send(new ServerboundPunchPacket());
+                                mc.player.swing(InteractionHand.MAIN_HAND, SwingAnimation.DEFAULT, true);
+                            }
+                        }
+                    }
+                    else if (((listmode.get()== listModes.whitelist && nonskippableBlox.get().contains(mc.level.getBlockState(blockPos).getBlock())) || (listmode.get()== listModes.blacklist && !skippableBlox.get().contains(mc.level.getBlockState(blockPos).getBlock()))) && !rotate.get() && BlockUtils.canBreak(blockPos) && BlockUtils.canInstaBreak(blockPos)){
+                        renderBlocks.add(renderBlockPool.get().set(blockPos));
+                        mc.getConnection().send(new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, blockPos, direction));
+                        if (swing.get()){
+                            mc.getConnection().send(new ServerboundPunchPacket());
+                            mc.player.swing(InteractionHand.MAIN_HAND, SwingAnimation.DEFAULT, true);
+                        }
+                    }
+                    if (((listmode.get()== listModes.whitelist && nonskippableBlox.get().contains(mc.level.getBlockState(blockPos).getBlock())) || (listmode.get()== listModes.blacklist && !skippableBlox.get().contains(mc.level.getBlockState(blockPos).getBlock()))) && rotate.get() && BlockUtils.canBreak(blockPos) && BlockUtils.canInstaBreak(blockPos)){
+                        if (direction != null) {
+                            Rotations.rotate(Rotations.getYaw(blockPos), Rotations.getPitch(blockPos), () -> mc.getConnection().send(new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, blockPos, direction)));
+                            count++;
+                        }
+                    }
+                    else if (((listmode.get()== listModes.whitelist && nonskippableBlox.get().contains(mc.level.getBlockState(blockPos).getBlock())) || (listmode.get()== listModes.blacklist && !skippableBlox.get().contains(mc.level.getBlockState(blockPos).getBlock()))) && !rotate.get() && BlockUtils.canBreak(blockPos) && BlockUtils.canInstaBreak(blockPos)){
+                        mc.getConnection().send(new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, blockPos, direction));
+                        count++;
+                    }
+                } else if (!onlyInstamineable.get()) {
+                    if (((listmode.get()== listModes.whitelist && nonskippableBlox.get().contains(mc.level.getBlockState(blockPos).getBlock())) || (listmode.get()== listModes.blacklist && !skippableBlox.get().contains(mc.level.getBlockState(blockPos).getBlock()))) && rotate.get() && BlockUtils.canBreak(blockPos)){
+                        renderBlocks.add(renderBlockPool.get().set(blockPos));
+                        if (direction != null) {
+                            Rotations.rotate(Rotations.getYaw(blockPos), Rotations.getPitch(blockPos), () -> mc.getConnection().send(new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, blockPos, direction)));
+                            if (swing.get()){
+                                mc.getConnection().send(new ServerboundPunchPacket());
+                                mc.player.swing(InteractionHand.MAIN_HAND, SwingAnimation.DEFAULT, true);
+                            }
+                        }
+                    }
+                    else if (((listmode.get()== listModes.whitelist && nonskippableBlox.get().contains(mc.level.getBlockState(blockPos).getBlock())) || (listmode.get()== listModes.blacklist && !skippableBlox.get().contains(mc.level.getBlockState(blockPos).getBlock()))) && !rotate.get() && BlockUtils.canBreak(blockPos)){
+                        renderBlocks.add(renderBlockPool.get().set(blockPos));
+                        mc.getConnection().send(new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, blockPos, direction));
+                        if (swing.get()){
+                            mc.getConnection().send(new ServerboundPunchPacket());
+                            mc.player.swing(InteractionHand.MAIN_HAND, SwingAnimation.DEFAULT, true);
+                        }
+                    }
+                    if (((listmode.get()== listModes.whitelist && nonskippableBlox.get().contains(mc.level.getBlockState(blockPos).getBlock())) || (listmode.get()== listModes.blacklist && !skippableBlox.get().contains(mc.level.getBlockState(blockPos).getBlock()))) && rotate.get() && BlockUtils.canBreak(blockPos)){
+                        if (direction != null) {
+                            Rotations.rotate(Rotations.getYaw(blockPos), Rotations.getPitch(blockPos), () -> mc.getConnection().send(new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, blockPos, direction)));
+                            count++;
+                        }
+                    }
+                    else if (((listmode.get()== listModes.whitelist && nonskippableBlox.get().contains(mc.level.getBlockState(blockPos).getBlock())) || (listmode.get()== listModes.blacklist && !skippableBlox.get().contains(mc.level.getBlockState(blockPos).getBlock()))) && !rotate.get() && BlockUtils.canBreak(blockPos)){
+                        mc.getConnection().send(new ServerboundPlayerActionPacket(ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, blockPos, direction));
+                        count++;
+                    }
+                }
+            }
+            ticks=0;
+        }
+    }
+
+
+    public static class RenderBlock {
+        public BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        public int ticks;
+
+        public RenderBlock set(BlockPos blockPos) {
+            pos.set(blockPos);
+            ticks = 8;
+
+            return this;
+        }
+
+        public void tick() {
+            ticks--;
+        }
+
+        public void render(Render3DEvent event, Color sides, Color lines, ShapeMode shapeMode) {
+            int preSideA = sides.a;
+            int preLineA = lines.a;
+
+            sides.a *= (double) ticks / 8;
+            lines.a *= (double) ticks / 8;
+
+            event.renderer.box(pos, sides, lines, shapeMode, 0);
+
+            sides.a = preSideA;
+            lines.a = preLineA;
+        }
+    }
+
+    public enum Modes {
+        Sphere, Box
+    }
+    public enum listModes {
+        whitelist, blacklist
+    }
+}

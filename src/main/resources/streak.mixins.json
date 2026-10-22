@@ -1,0 +1,29 @@
+{
+  "required": true,
+  "package": "pwn.noobs.trouserstreak.mixin",
+  "compatibilityLevel": "JAVA_25",
+  "client": [
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "mixins": [
+    "AbstractBlockMixin",
+    "AbstractBoatEntityMixin",
+    "AbstractSignEditScreenMixin",
+    "AnvilScreenHandlerMixin",
+    "AnvilScreenMixin",
+    "InventoryScreenMixin",
+    "LecternScreenMixin",
+    "LoadingTerrainScreenMixin",
+    "PacketCodecsMixin",
+    "PlayerEntityMixin",
+    "ShulkerBoxScreenMixin",
+    "StorageLooterItemFilterMixin",
+    "StringEncodingMixin",
+    "TelemetryManagerMixin",
+    "TrouserHandshakeC2SMixin",
+    "TrouserSplashTextMixin",
+    "accessor.ClientConnectionAccessor"
+  ]
+}
